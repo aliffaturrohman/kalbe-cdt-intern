@@ -1,0 +1,17 @@
+=== DOC 1 ===
+Pertanian modern mulai memanfaatkan teknologi sensor dan drone untuk memantau kondisi lahan, kelembaban tanah, dan kesehatan tanaman secara real time.
+
+=== DOC 2 ===
+Pariwisata di Indonesia mengalami perkembangan pesat berkat promosi digital dan media sosial, yang membantu menarik wisatawan lokal maupun mancanegara.
+
+=== DOC 3 ===
+Pendidikan jarak jauh semakin populer, terutama setelah pandemi. Platform e-learning membuat akses pendidikan menjadi lebih inklusif.
+
+=== DOC 4 ===
+Transportasi publik di kota besar terus ditingkatkan dengan penggunaan sistem pembayaran digital dan integrasi antar moda.
+
+=== DOC 5 ===
+Kesehatan mental kini menjadi perhatian utama, dengan meningkatnya kesadaran masyarakat terhadap pentingnya konseling dan dukungan psikologis.
+
+
+

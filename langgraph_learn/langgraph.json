@@ -1,0 +1,10 @@
+{
+  "graphs": {
+    "my_graph": "main:graph"
+  },
+  "dependencies": [
+    "langchain",
+    "openai"
+  ]
+}
+

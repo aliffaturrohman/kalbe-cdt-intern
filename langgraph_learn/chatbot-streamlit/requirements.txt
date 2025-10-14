@@ -1,0 +1,8 @@
+streamlit
+python-dotenv
+tavily-python
+pymed-paperscraper
+langchain
+langgraph
+langchain-ollama
+regex

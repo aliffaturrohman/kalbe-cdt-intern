@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  yuzuriha-chatbot:
+    build: .
+    container_name: yuzuriha_chatbot
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_HOST=http://ollama:11435
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
