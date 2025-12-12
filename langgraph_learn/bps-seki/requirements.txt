@@ -1,0 +1,12 @@
+langchain
+langchain-core
+langchain-ollama
+langchain-community
+langgraph
+pandas
+sqlalchemy
+scikit-learn
+numpy
+prophet
+python-dotenv
+requests

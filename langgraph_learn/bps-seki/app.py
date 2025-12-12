@@ -9,9 +9,11 @@ from langchain_community.vectorstores import FAISS
 from langchain_ollama.llms import OllamaLLM
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.tools.tavily_search import TavilySearchResults
 
+# ================== CONFIGURATION ==================
 st.set_page_config(
-    page_title="BPS Data Chatbot",
+    page_title="BPS Data Chatbot (Hybrid)",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -19,46 +21,19 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .sub-header {
-        font-size: 1.2rem;
-        color: #666;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .chat-message {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
-    }
-    .user-message {
-        background-color: #e3f2fd;
-        border-left: 4px solid #2196f3;
-    }
-    .assistant-message {
-        background-color: #f5f5f5;
-        border-left: 4px solid #4caf50;
-    }
-    .stat-box {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        text-align: center;
-    }
+    .main-header { font-size: 2.5rem; font-weight: bold; color: #1f77b4; text-align: center; margin-bottom: 1rem; }
+    .sub-header { font-size: 1.2rem; color: #666; text-align: center; margin-bottom: 2rem; }
+    .chat-message { padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; }
 </style>
 """, unsafe_allow_html=True)
+engine = create_engine(f"sqlite:///{db_path}") #define engine diluar
+insp = inspect(engine)
+# ================== DATABASE & DOC FUNCTIONS ==================
 
 @st.cache_resource
 def load_all_tables(db_path: str) -> Dict[str, pd.DataFrame]:
     """Load semua tabel dari database SQLite"""
-    engine = create_engine(f"sqlite:///{db_path}")
-    insp = inspect(engine)
+    
     tables = {}
     for name in insp.get_table_names():
         df = pd.read_sql_table(name, engine)
@@ -66,203 +41,144 @@ def load_all_tables(db_path: str) -> Dict[str, pd.DataFrame]:
     return tables
 
 def create_table_metadata_docs(tables: Dict[str, pd.DataFrame]) -> List[Document]:
-    """Buat dokumen metadata untuk setiap tabel"""
+    """Buat dokumen metadata schema tabel"""
     docs = []
-    
     for table_name, df in tables.items():
-        metadata = {
-            "type": "table_metadata",
-            "table": table_name,
-            "row_count": len(df)
-        }
-        
+        metadata = {"type": "table_metadata", "table": table_name, "row_count": len(df)}
         columns_info = []
         for col in df.columns:
             dtype = str(df[col].dtype)
             unique_count = df[col].nunique()
-            
             if unique_count < 50:
                 sample_values = df[col].unique()[:10].tolist()
-                columns_info.append(
-                    f"- {col} ({dtype}): {unique_count} unique values. "
-                    f"Examples: {sample_values}"
-                )
+                columns_info.append(f"- {col} ({dtype}): {unique_count} unique. Ex: {sample_values}")
             else:
-                columns_info.append(
-                    f"- {col} ({dtype}): {unique_count} unique values"
-                )
+                columns_info.append(f"- {col} ({dtype}): {unique_count} unique")
         
-        content = f"""
-Table: {table_name}
-Description: BPS statistical data table
-Row count: {len(df)}
-Columns:
-{chr(10).join(columns_info)}
-
-This table contains BPS (Badan Pusat Statistik) data about {table_name.replace('_', ' ')}.
-"""
-        
+        content = f"Table: {table_name}\nRows: {len(df)}\nColumns:\n" + "\n".join(columns_info)
         docs.append(Document(page_content=content, metadata=metadata))
-    
     return docs
 
 def create_table_summary_docs(tables: Dict[str, pd.DataFrame]) -> List[Document]:
-    """Buat dokumen summary agregat"""
+    """Buat dokumen summary statistik sederhana"""
     docs = []
-    
     for table_name, df in tables.items():
         categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
         
         if categorical_cols and len(categorical_cols) <= 3:
-            for group_cols in [categorical_cols[:2]] if len(categorical_cols) >= 2 else [categorical_cols[:1]]:
-                try:
-                    grouped = df.groupby(group_cols)
-                    
-                    for group_key, group_df in grouped:
-                        if len(group_df) > 0:
-                            if isinstance(group_key, tuple):
-                                group_desc = ", ".join([f"{col}={val}" for col, val in zip(group_cols, group_key)])
-                            else:
-                                group_desc = f"{group_cols[0]}={group_key}"
-                            
-                            stats = []
-                            for num_col in numeric_cols:
-                                if num_col in group_df.columns:
-                                    mean_val = group_df[num_col].mean()
-                                    if pd.notna(mean_val):
-                                        stats.append(f"{num_col} avg: {mean_val:.2f}")
-                            
-                            content = f"""
-                                Table: {table_name}
-                                Filter: {group_desc}
-                                Records: {len(group_df)}
-                                Statistics: {', '.join(stats) if stats else 'N/A'}
-
-                                Data available for: {group_desc} in {table_name}
-                            """
-                            
-                            metadata = {
-                                "type": "table_summary",
-                                "table": table_name,
-                                "filter": group_desc,
-                                "row_count": len(group_df)
-                            }
-                            
-                            docs.append(Document(page_content=content, metadata=metadata))
-                except Exception as e:
-                    continue
-    
+            group_cols = categorical_cols[:2] if len(categorical_cols) >= 2 else categorical_cols[:1]
+            try:
+                grouped = df.groupby(group_cols)
+                for group_key, group_df in grouped:
+                    if len(group_df) > 0:
+                        group_desc = str(group_key)
+                        stats = []
+                        for num_col in numeric_cols:
+                            if num_col in group_df.columns:
+                                mean_val = group_df[num_col].mean()
+                                if pd.notna(mean_val):
+                                    stats.append(f"{num_col} avg: {mean_val:.2f}")
+                        
+                        content = f"Table: {table_name}\nFilter: {group_cols}={group_desc}\nStats: {', '.join(stats)}"
+                        docs.append(Document(page_content=content, metadata={"type": "summary", "table": table_name}))
+            except Exception:
+                continue
     return docs
 
 def create_row_docs(tables: Dict[str, pd.DataFrame], sample_ratio: float = 0.3) -> List[Document]:
-    """Buat dokumen per-row dengan format compact"""
+    """Buat dokumen sampel baris data"""
     docs = []
-    
     for table_name, df in tables.items():
-        if len(df) > 100:
-            sampled_df = df.sample(n=int(len(df) * sample_ratio), random_state=42)
-        else:
-            sampled_df = df
-        
+        sampled_df = df.sample(n=int(len(df) * sample_ratio), random_state=42) if len(df) > 100 else df
         for idx, row in sampled_df.iterrows():
-            important_fields = []
-            for col, val in row.items():
-                if pd.notna(val) and val != '':
-                    important_fields.append(f"{col}: {val}")
-            
-            content = f"Table: {table_name}\n" + " | ".join(important_fields[:10])
-            
-            metadata = {
-                "type": "row_data",
-                "table": table_name,
-                "row_index": idx
-            }
-            
-            docs.append(Document(page_content=content, metadata=metadata))
-    
+            fields = [f"{col}: {val}" for col, val in row.items() if pd.notna(val) and val != '']
+            content = f"Table: {table_name} Data Row:\n" + " | ".join(fields[:15])
+            docs.append(Document(page_content=content, metadata={"type": "row_data", "table": table_name}))
     return docs
 
 def format_docs(docs):
-    """Format dokumen dengan prioritas: metadata > summary > row data"""
-    metadata_docs = [d for d in docs if d.metadata.get("type") == "table_metadata"]
-    summary_docs = [d for d in docs if d.metadata.get("type") == "table_summary"]
-    row_docs = [d for d in docs if d.metadata.get("type") == "row_data"]
-    
+    """Format dokumen retrieved dari Vectorstore"""
+    return "\n\n".join([d.page_content for d in docs])
+
+def format_tavily_results(results):
+    """Format hasil pencarian Tavily menjadi string bersih"""
+    if not results: return "No web results found."
+    if isinstance(results, str): return results
     formatted = []
-    
-    if metadata_docs:
-        formatted.append("=== TABLE SCHEMAS ===")
-        formatted.extend([d.page_content for d in metadata_docs[:2]])
-    
-    if summary_docs:
-        formatted.append("\n=== DATA SUMMARIES ===")
-        formatted.extend([d.page_content for d in summary_docs[:5]])
-    
-    if row_docs:
-        formatted.append("\n=== SAMPLE DATA ===")
-        formatted.extend([d.page_content for d in row_docs[:5]])
-    
+    for r in results:
+        content = r.get('content', '')[:300] + "..." 
+        url = r.get('url', '')
+        formatted.append(f"- {content} (Source: {url})")
     return "\n\n".join(formatted)
 
-# ================== INITIALIZATION ==================
+# ================== SYSTEM INITIALIZATION ==================
+
 @st.cache_resource
-def initialize_system(db_path: str):
-    """Initialize database, vectorstore, dan LLM"""
+def initialize_system(db_path: str, tavily_api_key: str = None):
+    """Initialize Hybrid RAG System"""
     
-    # Load database
+    # 1. Load Local DB
     tables = load_all_tables(db_path)
-    
-    # Create documents
-    metadata_docs = create_table_metadata_docs(tables)
-    summary_docs = create_table_summary_docs(tables)
-    row_docs = create_row_docs(tables, sample_ratio=0.5)
-    
-    all_docs = metadata_docs + summary_docs + row_docs
-    
-    # Build vectorstore
-    emb = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    all_docs = (
+        create_table_metadata_docs(tables) + 
+        create_table_summary_docs(tables) + 
+        create_row_docs(tables, sample_ratio=0.5)
     )
+    
+    emb = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     vectorstore = FAISS.from_documents(all_docs, emb)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
     
-    # Initialize LLM
-    llm = OllamaLLM(model="gemma3:latest")
+    # 2. Setup Tools
+    if tavily_api_key:
+        os.environ["TAVILY_API_KEY"] = tavily_api_key
+        tavily_tool = TavilySearchResults(max_results=3) 
+    else:
+        tavily_tool = None
+
+    # Setup LLM
+    # Pastikan model Ollama kamu support streaming (qwen/gemma biasanya support)
+    llm = OllamaLLM(model="gemma3:latest") 
     
-    # Create retriever
-    retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": 20}
-    )
-    
-    # Create prompt
+    # 3. Construct Chain
     prompt = ChatPromptTemplate.from_template("""
-        You are a knowledgeable assistant specialized in Indonesian BPS (Badan Pusat Statistik) data.
-
-        Use the following context to answer the question accurately. The context includes:
-        1. Table schemas (structure and column information)
-        2. Data summaries (aggregated statistics)
-        3. Sample data (actual records)
-
-        IMPORTANT INSTRUCTIONS:
-        - If the answer involves numbers, provide specific values from the context
-        - If you need to compare data across years, regions, or categories, use the summaries
-        - If the context doesn't contain enough information, say "I don't have enough data to answer this accurately"
-        - Always mention which table(s) the information comes from
-        - Format numbers clearly (use thousands separators when appropriate)
-
-        Context:
-        {context}
-
-        Question: {question}
-
-        Answer (in Indonesian):
-        """)
+    You are an expert Data Assistant for BPS (Badan Pusat Statistik) Indonesia.
+    You have access to two sources:
     
-    # Create QA chain
+    1. INTERNAL DATABASE (Primary Source): Official statistics, exact numbers, table structures.
+    2. INTERNET SEARCH (Secondary Source): Definitions, news, reasons, comparisons.
+
+    === DATABASE CONTEXT ===
+    {db_context}
+
+    === INTERNET CONTEXT ===
+    {web_context}
+
+    INSTRUCTIONS:
+    - Answer in Indonesian.
+    - If asked for data/numbers available in the database, USE THE DATABASE values precisely.
+    - Use the Internet Context to explain "Why" or provide recent news not in the database.
+    - Always cite the table name if using database data.
+    - If the database is empty on the topic, rely on the Internet Context but mention it comes from the web.
+
+    Question: {question}
+    Answer:
+    """)
+    
+    def run_web_search(query):
+        if not tavily_tool:
+            return "Web search disabled (No API Key)."
+        try:
+            res = tavily_tool.invoke(query)
+            return format_tavily_results(res)
+        except Exception as e:
+            return f"Web search failed: {str(e)}"
+
     qa_chain = (
         {
-            "context": lambda x: format_docs(retriever.invoke(x["question"])),
+            "db_context": lambda x: format_docs(retriever.invoke(x["question"])),
+            "web_context": lambda x: run_web_search(x["question"]),
             "question": lambda x: x["question"],
         }
         | prompt
@@ -270,131 +186,91 @@ def initialize_system(db_path: str):
     )
     
     stats = {
-        "tables": tables,
-        "doc_counts": {
-            "metadata": len(metadata_docs),
-            "summary": len(summary_docs),
-            "row": len(row_docs),
-            "total": len(all_docs)
-        }
+        "tables": list(tables.keys()),
+        "doc_count": len(all_docs)
     }
     
     return qa_chain, stats
 
-# ================== SESSION STATE ==================
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# ================== MAIN APP UI (STREAMING ENABLED) ==================
 
-if "qa_chain" not in st.session_state:
-    st.session_state.qa_chain = None
-    st.session_state.stats = None
-
-# ================== MAIN APP ==================
 def main():
-    # Header
-    st.markdown('<div class="main-header">📊 BPS Data Chatbot</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Tanya jawab interaktif dengan data Badan Pusat Statistik</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">📊 BPS Data Chatbot (Hybrid)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Database Lokal + Internet Search (Tavily)</div>', unsafe_allow_html=True)
     
-    # Sidebar
+    if "messages" not in st.session_state: st.session_state.messages = []
+    if "qa_chain" not in st.session_state: st.session_state.qa_chain = None
+    
     with st.sidebar:
-        st.header("⚙️ Settings")
+        st.header("⚙️ Configuration")
+        db_path = st.text_input("📁 Database Path (.db)", value="bps_seki.db")
+        st.markdown("---")
+        tavily_key = st.text_input("🌐 Tavily API Key", type="password", help="Get free key at tavily.com")
         
-        db_path = st.text_input("Database Path", value="bps_seki.db")
-        
-        if st.button("🔄 Initialize System", type="primary"):
-            if os.path.exists(db_path):
-                with st.spinner("Loading database and building vectorstore..."):
+        if st.button("🚀 Initialize System", type="primary"):
+            if not os.path.exists(db_path):
+                st.error(f"File {db_path} tidak ditemukan!")
+            else:
+                with st.spinner("Indexing Database & Connecting to Tools..."):
                     try:
-                        qa_chain, stats = initialize_system(db_path)
+                        qa_chain, stats = initialize_system(db_path, tavily_key)
                         st.session_state.qa_chain = qa_chain
                         st.session_state.stats = stats
-                        st.success("✅ System initialized successfully!")
+                        
+                        st.success("System Ready!")
+                        if tavily_key:
+                            st.info("✅ Internet Access: ENABLED")
+                        else:
+                            st.warning("⚠️ Internet Access: DISABLED (No Key)")
+                            
                     except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
-            else:
-                st.error("❌ Database file not found!")
-        
+                        st.error(f"Init Error: {str(e)}")
+
+        if "stats" in st.session_state and st.session_state.stats:
+            st.markdown("---")
+            st.subheader("📊 Data Stats")
+            st.write(f"**Indexed Docs:** {st.session_state.stats['doc_count']}")
+            with st.expander("View Tables"):
+                st.write(st.session_state.stats['tables'])
+                
         st.markdown("---")
-        
-        # Display statistics
-        if st.session_state.stats:
-            st.header("📈 Statistics")
-            
-            stats = st.session_state.stats
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Tables", len(stats["tables"]))
-            with col2:
-                st.metric("Documents", stats["doc_counts"]["total"])
-            
-            with st.expander("📋 Document Breakdown"):
-                st.write(f"**Metadata:** {stats['doc_counts']['metadata']}")
-                st.write(f"**Summaries:** {stats['doc_counts']['summary']}")
-                st.write(f"**Row Data:** {stats['doc_counts']['row']}")
-            
-            with st.expander("📊 Tables in Database"):
-                for table_name, df in stats["tables"].items():
-                    st.write(f"**{table_name}**: {len(df)} rows")
-        
-        st.markdown("---")
-        
-        if st.button("🗑️ Clear Chat History"):
+        if st.button("🗑️ Reset Chat"):
             st.session_state.messages = []
             st.rerun()
-        
-        st.markdown("---")
-        st.caption("💡 Tip: Initialize the system first before asking questions!")
-    
-    # Main chat interface
+
     if st.session_state.qa_chain is None:
-        st.info("👈 Please initialize the system from the sidebar first!")
-        
-        # Show example questions
-        st.markdown("### 📝 Example Questions:")
-        examples = [
-            "Berapa inflasi Indonesia tahun 2023?",
-            "Tunjukkan data kelahiran di Jawa Timur",
-            "Bandingkan PDB berbagai region",
-            "Apa saja kategori data yang tersedia?"
-        ]
-        
-        for example in examples:
-            st.markdown(f"- {example}")
-        
+        st.info("👈 Silakan masukkan Database Path & Tavily API Key di sidebar, lalu klik Initialize.")
         return
-    
-    # Display chat messages
+
+    # Display History
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-    
-    # Chat input
-    if prompt := st.chat_input("Tanyakan sesuatu tentang data BPS..."):
-        # Add user message
+
+    # User Input
+    if prompt := st.chat_input("Tanyakan data BPS atau info terkait..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-        
-        # Generate response
+
+        # Assistant Response (STREAMING)
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
+            # Langkah 1: Spinner hanya untuk proses retrieval (Database + Web Search)
+            # Begitu retrieval selesai, spinner hilang dan teks mulai mengetik.
+            with st.spinner("🔍 Retrieving data & thinking..."):
                 try:
-                    result = st.session_state.qa_chain.invoke({"question": prompt})
+                    # Kita buat generator stream
+                    stream_generator = st.session_state.qa_chain.stream({"question": prompt})
                     
-                    # Extract answer
-                    if isinstance(result, dict):
-                        response = result.get("answer") or result.get("output_text") or str(result)
-                    else:
-                        response = str(result)
+                    # Langkah 2: Gunakan st.write_stream
+                    # Fungsi ini otomatis mengambil generator dan menampilkannya sebagai typewriter
+                    response = st.write_stream(stream_generator)
                     
-                    st.markdown(response)
+                    # Langkah 3: Simpan hasil akhir ke history
                     st.session_state.messages.append({"role": "assistant", "content": response})
-                
+                    
                 except Exception as e:
-                    error_msg = f"❌ Error: {str(e)}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                    st.error(f"Error generating response: {str(e)}")
 
 if __name__ == "__main__":
     main()
