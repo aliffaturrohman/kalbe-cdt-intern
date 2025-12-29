@@ -16,9 +16,9 @@ class MetadataManager:
     """Manages metadata retrieval and search"""
     
     def __init__(self, metadata_dir: Optional[Path] = None):
+        # Menggunakan config.METADATA_DIR sebagai default
         self.metadata_dir = metadata_dir or config.METADATA_DIR
         self._metadata_cache = None
-        self._metadata_index = None
         
     def load_all_metadata(self, force_reload: bool = False) -> Dict[str, Any]:
         """Load semua metadata dari folder"""
@@ -26,6 +26,15 @@ class MetadataManager:
             return self._metadata_cache
         
         metadata = {}
+        
+        # Pastikan direktori ada
+        if not self.metadata_dir.exists():
+            logger.log("METADATA_LOAD", {
+                "status": "ERROR",
+                "message": f"Directory not found: {self.metadata_dir}"
+            }, level="ERROR")
+            return metadata
+
         json_files = list(self.metadata_dir.glob("*.json"))
         
         if not json_files:
@@ -39,9 +48,11 @@ class MetadataManager:
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     table_name = json_file.stem
-                    metadata[table_name] = json.load(f)
+                    data = json.load(f)
+                    metadata[table_name] = data
                     
-                logger.log("METADATA_LOAD", {
+                # Log setiap file yang berhasil di-load
+                logger.log("METADATA_LOAD_FILE", {
                     "file": json_file.name,
                     "table": table_name,
                     "status": "SUCCESS"
@@ -55,6 +66,7 @@ class MetadataManager:
                 }, level="ERROR")
         
         self._metadata_cache = metadata
+        
         logger.log("METADATA_LOAD_COMPLETE", {
             "total_tables": len(metadata),
             "tables": list(metadata.keys())
@@ -105,23 +117,27 @@ class MetadataManager:
                                 score += 0.5
             
             if score > 0:
+                # --- PERBAIKAN: Menghapus slicing pada description ---
                 scores.append({
                     "table_name": table_name,
                     "metadata": meta,
                     "relevance_score": score,
-                    "description": desc[:100] + "..." if len(desc) > 100 else desc
+                    "description": meta.get("description", "") # Full description
                 })
         
+        # Sort by score highest first
         scores.sort(key=lambda x: x["relevance_score"], reverse=True)
         
+        top_results = scores[:top_k]
+        
         logger.log("METADATA_RETRIEVAL", {
-            "user_query": user_query,
+            "user_query": user_query, # Full query
             "total_candidates": len(scores),
-            "top_results": [s["table_name"] for s in scores[:top_k]],
-            "scores": [s["relevance_score"] for s in scores[:top_k]]
+            "top_results_names": [s["table_name"] for s in top_results],
+            "scores": [s["relevance_score"] for s in top_results]
         })
         
-        return scores[:top_k]
+        return top_results
     
     def build_schema_prompt(self, table_info: Dict) -> str:
         """Build schema description untuk prompt SQL"""
@@ -130,6 +146,7 @@ class MetadataManager:
         
         schema_lines = []
         for col_name, col_info in columns.items():
+            # Handle jika col_info hanya string deskripsi
             if isinstance(col_info, str):
                 col_info = {
                     "type": "string",
@@ -142,6 +159,7 @@ class MetadataManager:
         
         schema_text = "\n".join(schema_lines)
         
+        # Mengembalikan prompt schema lengkap
         return f"""Table: {table_info['table_name']}
 Description: {meta.get('description', 'No description')}
 Columns:

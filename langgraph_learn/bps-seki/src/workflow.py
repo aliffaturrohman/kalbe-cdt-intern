@@ -1,3 +1,4 @@
+# src/workflow.py
 """Workflow builder untuk LangGraph - Basic & Enhanced Versions"""
 
 from langgraph.graph import StateGraph, END
@@ -21,8 +22,8 @@ from .nodes import (
     
     # Enhanced Nodes
     enhanced_metadata_retriever_node,
-    enhanced_sql_agent_node,
-    # enhanced_forecast_agent_node - Tidak ada di nodes.py, jadi kita buat sendiri nanti
+    enhanced_sql_agent_node
+    # Note: enhanced_forecast_agent_node didefinisikan di file ini
 )
 from .forecast_agent import EnhancedForecastAgent
 from .llm_client import llm_client
@@ -32,7 +33,7 @@ logger = AuditLogger()
 # Buat instance EnhancedForecastAgent untuk digunakan di workflow
 enhanced_forecast_agent = EnhancedForecastAgent(llm_client)
 
-# 🔧 Enhanced Forecast Agent Node (kita buat di sini karena tidak ada di nodes.py)
+# 🔧 Enhanced Forecast Agent Node (Defined here as wrapper)
 def enhanced_forecast_agent_node(state: AgentState) -> AgentState:
     """Enhanced forecasting node dengan auto-detection dan multiple methods"""
     logger.log("NODE_ENTER", {"node": "enhanced_forecast_agent"})
@@ -466,18 +467,14 @@ def print_workflow_debug_info(graph: StateGraph) -> None:
     """Print debug information tentang workflow"""
     
     print("\n🔍 WORKFLOW DEBUG INFO:")
-    print(f"   Nodes: {list(graph.nodes.keys())}")
-    print(f"   Entry point: {graph.entry_point}")
+    # Note: Accessing internal structure might depend on LangGraph version
+    if hasattr(graph, 'nodes'):
+        print(f"   Nodes: {list(graph.nodes.keys())}")
+        print(f"   Entry point: {graph.entry_point}")
+    else:
+        print("   Graph structure compiled. Ready to run.")
     
-    # Cek edges
-    print("\n   Conditional edges:")
-    for node_name, node_info in graph.nodes.items():
-        if hasattr(node_info, 'conditional_edges'):
-            edges = node_info.conditional_edges
-            if edges:
-                print(f"     {node_name}: {edges}")
-    
-    print(f"\n   Total nodes: {len(graph.nodes)}")
+    print("   Workflow is ready.")
 
 # Export semua workflow builders
 __all__ = [

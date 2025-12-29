@@ -13,30 +13,34 @@ from .sql_validator import SQLValidator
 from .sql_executor import SQLExecutor
 from .llm_client import llm_client
 from .smart_selector import SmartTableSelector
-from .forecast_agent import EnhancedForecastAgent, SimpleForecastAgent  # Tambah import
+from .forecast_agent import EnhancedForecastAgent, SimpleForecastAgent
+from .tools import web_search_tool  # <--- IMPORT BARU
 
+# Inisialisasi Service
 logger = AuditLogger()
 metadata_manager = MetadataManager()
 sql_executor = SQLExecutor()
 smart_selector = SmartTableSelector()
 enhanced_forecast_agent = EnhancedForecastAgent(llm_client)
-simple_forecast_agent = SimpleForecastAgent()  # Tambah instance untuk basic version
+simple_forecast_agent = SimpleForecastAgent()
 
-# Basic Nodes
+# --- Basic Nodes ---
+
 def router_node(state: AgentState) -> AgentState:
     """Node 1: Router - Intent detection"""
     logger.log("NODE_ENTER", {"node": "router", "input": state["user_input"]})
     
     user_input = state["user_input"].lower()
     
-    forecast_keywords = ["prediksi", "forecast", "ramal", "estimasi", "proyeksi"]
-    sql_keywords = ["tampilkan", "lihat", "berapa", "total", "jumlah", "data", "select"]
+    forecast_keywords = ["prediksi", "forecast", "ramal", "estimasi", "proyeksi", "tren", "masa depan"]
+    sql_keywords = ["tampilkan", "lihat", "berapa", "total", "jumlah", "data", "select", "daftar", "statistik"]
     
     if any(keyword in user_input for keyword in forecast_keywords):
         state["intent"] = "forecast"
     elif any(keyword in user_input for keyword in sql_keywords):
         state["intent"] = "sql"
     else:
+        # Jika tidak mengandung keyword data eksplisit, masuk ke clarify/general chat
         state["intent"] = "clarify"
     
     state["next_node"] = "metadata_retriever"
@@ -52,17 +56,25 @@ def enhanced_metadata_retriever_node(state: AgentState) -> AgentState:
     """Enhanced: Auto-table selection dengan LLM"""
     logger.log("NODE_ENTER", {"node": "enhanced_metadata_retriever"})
     
+    # Jika intent awal adalah clarify/general question, skip pencarian tabel database
+    # agar langsung ditangani oleh Web Search di clarify_agent_node
+    if state.get("intent") == "clarify":
+        state["next_node"] = "clarify_agent"
+        return state
+
     # Find relevant tables
     relevant_tables = metadata_manager.find_relevant_tables(state["user_input"], top_k=5)
     state["relevant_tables"] = relevant_tables
     
     if not relevant_tables:
-        state["needs_clarification"] = True
-        state["clarification_question"] = (
-            "Maaf, saya tidak menemukan data yang relevan. "
-            "Bisa Anda gunakan kata kunci yang lebih spesifik?"
-        )
+        # Jika tidak ketemu tabel, jangan langsung error/minta klarifikasi tabel.
+        # Tapi lempar ke clarify_agent untuk dicoba cari di WEB.
+        state["needs_clarification"] = False 
         state["next_node"] = "clarify_agent"
+        
+        logger.log("METADATA_NOT_FOUND", {
+            "action": "Fallback to Web Search (Clarify Agent)"
+        })
         return state
     
     # Auto-table selection dengan LLM
@@ -74,6 +86,7 @@ def enhanced_metadata_retriever_node(state: AgentState) -> AgentState:
     
     selected_table = selection_result.get("selected")
     
+    # Ambang batas confidence 0.3
     if selected_table and selection_result.get("confidence", 0) > 0.3:
         state["selected_table"] = selected_table["table_name"]
         state["table_metadata"] = selected_table["metadata"]
@@ -88,7 +101,7 @@ def enhanced_metadata_retriever_node(state: AgentState) -> AgentState:
             "reason": selection_result.get("reason", "")
         }, level="SUCCESS")
     else:
-        # Fallback
+        # Fallback: Ambil yang relevance score-nya paling tinggi
         best_table = max(relevant_tables, key=lambda x: x.get("relevance_score", 0))
         state["selected_table"] = best_table["table_name"]
         state["table_metadata"] = best_table["metadata"]
@@ -131,9 +144,14 @@ def enhanced_sql_agent_node(state: AgentState) -> AgentState:
     )
     
     if not table_info:
-        state["error"] = f"Table {state['selected_table']} not found"
-        state["next_node"] = "error_handler"
-        return state
+        # Coba construct table info manual jika tidak ada di relevant_tables (fallback)
+        meta = metadata_manager.get_table_metadata(state["selected_table"])
+        if meta:
+             table_info = {"table_name": state["selected_table"], "metadata": meta}
+        else:
+            state["error"] = f"Table {state['selected_table']} not found"
+            state["next_node"] = "error_handler"
+            return state
     
     # Build smart prompt
     prompt = smart_selector.build_smart_sql_prompt(
@@ -150,7 +168,9 @@ def enhanced_sql_agent_node(state: AgentState) -> AgentState:
         state["next_node"] = "error_handler"
         return state
     
-    raw_sql = response["content"].strip().strip("`")
+    # Bersihkan markdown syntax (```sql ... ```)
+    raw_sql = response["content"].strip()
+    raw_sql = raw_sql.replace("```sql", "").replace("```", "").strip()
     
     # Validate SQL
     validation = SQLValidator.validate_sql(raw_sql)
@@ -177,7 +197,7 @@ def enhanced_sql_agent_node(state: AgentState) -> AgentState:
     
     logger.log("ENHANCED_SQL_GENERATED", {
         "table": state["selected_table"],
-        "sql_preview": raw_sql[:200]
+        "sql_preview": raw_sql
     }, level="SUCCESS")
     
     return state
@@ -205,30 +225,28 @@ def sql_executor_node(state: AgentState) -> AgentState:
 def metadata_retriever_node_basic(state: AgentState) -> AgentState:
     """
     BASIC VERSION: Metadata retriever tanpa auto-selection.
-    User perlu memilih tabel jika ada multiple candidates.
     """
     logger.log("NODE_ENTER", {"node": "metadata_retriever_basic"})
+    
+    if state.get("intent") == "clarify":
+        state["next_node"] = "clarify_agent"
+        return state
     
     # Cari tabel relevan (hanya top 3 untuk simplicity)
     relevant_tables = metadata_manager.find_relevant_tables(
         state["user_input"], 
-        top_k=3  # Basic: hanya ambil 3 terbaik
+        top_k=3
     )
     
     state["relevant_tables"] = relevant_tables
     
     if not relevant_tables:
-        # Tidak ada tabel yang ditemukan
-        state["needs_clarification"] = True
-        state["clarification_question"] = (
-            "Maaf, saya tidak menemukan data yang sesuai dengan permintaan Anda. "
-            "Bisa Anda jelaskan dengan kata kunci yang berbeda?"
-        )
+        # Fallback ke Web Search jika tidak ada tabel
+        state["needs_clarification"] = False
         state["next_node"] = "clarify_agent"
         
         logger.log("METADATA_BASIC_NO_TABLES", {
-            "user_query": state["user_input"],
-            "message": "No relevant tables found"
+            "message": "Fallback to Web Search"
         }, level="WARNING")
         
         return state
@@ -241,7 +259,6 @@ def metadata_retriever_node_basic(state: AgentState) -> AgentState:
         state["next_node"] = "planner"
         
         logger.log("METADATA_BASIC_AUTO_SELECT", {
-            "user_query": state["user_input"],
             "selected_table": selected_table["table_name"],
             "reason": "Only one relevant table found"
         })
@@ -262,7 +279,6 @@ def metadata_retriever_node_basic(state: AgentState) -> AgentState:
         state["next_node"] = "clarify_agent"
         
         logger.log("METADATA_BASIC_NEED_SELECTION", {
-            "user_query": state["user_input"],
             "tables_found": len(relevant_tables),
             "table_names": [t["table_name"] for t in relevant_tables]
         })
@@ -270,10 +286,7 @@ def metadata_retriever_node_basic(state: AgentState) -> AgentState:
     return state
 
 def sql_agent_node_basic(state: AgentState) -> AgentState:
-    """
-    BASIC VERSION: SQL generation sederhana tanpa smart features.
-    Tidak ada tahun detection, hanya prompt dasar.
-    """
+    """BASIC VERSION: SQL generation sederhana"""
     logger.log("NODE_ENTER", {"node": "sql_agent_basic"})
     
     if not state.get("selected_table"):
@@ -288,13 +301,18 @@ def sql_agent_node_basic(state: AgentState) -> AgentState:
     )
     
     if not table_info:
-        state["error"] = f"Tabel {state['selected_table']} tidak ditemukan"
-        state["next_node"] = "error_handler"
-        return state
+        # Fallback load manual
+        meta = metadata_manager.get_table_metadata(state["selected_table"])
+        if meta:
+             table_info = {"table_name": state["selected_table"], "metadata": meta}
+        else:
+            state["error"] = f"Tabel {state['selected_table']} tidak ditemukan"
+            state["next_node"] = "error_handler"
+            return state
     
-    # BASIC: Prompt sederhana tanpa tahun detection
     schema_text = metadata_manager.build_schema_prompt(table_info)
-    
+    default_limit = getattr(config, 'DEFAULT_LIMIT', 5)
+
     prompt = f"""
     Buatkan query SQL untuk pertanyaan berikut:
     
@@ -306,13 +324,12 @@ def sql_agent_node_basic(state: AgentState) -> AgentState:
     Aturan:
     1. Hanya gunakan SELECT statement
     2. Filter berdasarkan region jika ada access column
-    3. Batasi hasil dengan LIMIT {config.DEFAULT_LIMIT} jika tidak disebutkan
-    4. Return HANYA kode SQL, tanpa penjelasan
+    3. Batasi hasil dengan LIMIT {default_limit} jika tidak disebutkan
+    4. Return HANYA kode SQL, tanpa penjelasan atau markdown formatting.
     
     SQL Query:
     """
     
-    # Generate SQL dengan LLM
     response = llm_client.call_sql_llm(prompt)
     
     if not response["success"]:
@@ -320,16 +337,15 @@ def sql_agent_node_basic(state: AgentState) -> AgentState:
         state["next_node"] = "error_handler"
         return state
     
-    raw_sql = response["content"].strip().strip("`")
+    raw_sql = response["content"].strip()
+    raw_sql = raw_sql.replace("```sql", "").replace("```", "").strip()
     
-    # Validasi dasar
     validation = SQLValidator.validate_sql(raw_sql)
     if not validation["is_valid"]:
         state["error"] = f"SQL validation failed: {validation['reason']}"
         state["next_node"] = "error_handler"
         return state
     
-    # BASIC: Inject region filter (sama seperti enhanced)
     access_column = table_info["metadata"].get("access_column")
     if access_column and state.get("user_context", {}).get("region"):
         raw_sql = SQLValidator.inject_region_filter(
@@ -338,7 +354,6 @@ def sql_agent_node_basic(state: AgentState) -> AgentState:
             state["user_context"]["region"]
         )
     
-    # Tambahkan LIMIT jika tidak ada
     raw_sql = SQLValidator.add_limit_if_missing(raw_sql)
     
     state["raw_sql"] = raw_sql
@@ -347,17 +362,13 @@ def sql_agent_node_basic(state: AgentState) -> AgentState:
     
     logger.log("SQL_BASIC_GENERATED", {
         "table": state["selected_table"],
-        "sql_preview": raw_sql[:200],
-        "prompt_length": len(prompt)
+        "sql_preview": raw_sql
     }, level="SUCCESS")
     
     return state
 
 def forecast_agent_node_basic(state: AgentState) -> AgentState:
-    """
-    BASIC VERSION: Forecasting sederhana tanpa enhanced features.
-    Hanya linear regression, tidak ada auto-detection.
-    """
+    """BASIC VERSION: Forecasting sederhana"""
     logger.log("NODE_ENTER", {"node": "forecast_agent_basic"})
     
     if not state.get("selected_table"):
@@ -367,8 +378,6 @@ def forecast_agent_node_basic(state: AgentState) -> AgentState:
     
     table_name = state["selected_table"]
     table_meta = state.get("table_metadata", {})
-    
-    # BASIC: Deteksi kolom sederhana (tanpa LLM)
     columns = table_meta.get("columns", {})
     
     if not columns:
@@ -390,28 +399,24 @@ def forecast_agent_node_basic(state: AgentState) -> AgentState:
         if any(keyword in col_lower for keyword in ["nilai", "value", "jumlah", "total", "qty", "quantity", "volume"]):
             value_candidates.append(col_name)
     
-    # Fallback jika tidak ditemukan
+    # Fallback
     if not date_candidates:
         date_candidates = list(columns.keys())
     
     if not value_candidates and len(columns) > 1:
-        # Hindari menggunakan kolom yang sama untuk tanggal dan nilai
         value_candidates = [col for col in list(columns.keys()) if col != date_candidates[0]]
     
     date_col = date_candidates[0] if date_candidates else list(columns.keys())[0]
     value_col = value_candidates[0] if value_candidates else list(columns.keys())[1] if len(columns) > 1 else list(columns.keys())[0]
     
-    # Build SQL query sederhana
     sql = f"SELECT {date_col}, {value_col} FROM {table_name}"
     
-    # Tambahkan filter region jika ada
     access_column = table_meta.get("access_column")
     if access_column and state.get("user_context", {}).get("region"):
         sql += f" WHERE {access_column} LIKE '{state['user_context']['region']}%'"
     
     sql += f" ORDER BY {date_col}"
     
-    # Execute query
     result = sql_executor.execute(sql)
     
     if not result["success"]:
@@ -425,14 +430,14 @@ def forecast_agent_node_basic(state: AgentState) -> AgentState:
         return state
     
     df = result["data"]
-    
-    if len(df) < config.MIN_DATA_POINTS:
-        state["error"] = f"Data tidak cukup untuk forecasting. Minimal {config.MIN_DATA_POINTS} baris, dapat {len(df)}"
+    min_data = getattr(config, 'MIN_DATA_POINTS', 3)
+
+    if len(df) < min_data:
+        state["error"] = f"Data tidak cukup untuk forecasting. Minimal {min_data} baris, dapat {len(df)}"
         state["next_node"] = "error_handler"
         return state
     
     try:
-        # BASIC: Gunakan simple forecast agent
         forecast_result = simple_forecast_agent.linear_forecast(
             df=df,
             date_column=date_col,
@@ -443,7 +448,7 @@ def forecast_agent_node_basic(state: AgentState) -> AgentState:
         if not forecast_result["success"]:
             state["error"] = forecast_result.get("error", "Forecast failed")
             state["next_node"] = "error_handler"
-            return forecast_result
+            return state
         
         state["forecast_result"] = forecast_result
         state["next_node"] = "response_formatter"
@@ -465,11 +470,16 @@ def forecast_agent_node_basic(state: AgentState) -> AgentState:
     return state
 
 def clarify_agent_node(state: AgentState) -> AgentState:
-    """Handle user clarification"""
+    """
+    Node Clarify / General Chat dengan Tavily Web Search.
+    Menangani 2 kondisi:
+    1. Disambiguasi Tabel (user perlu memilih tabel).
+    2. General Question (data tidak ada di DB, cari di web).
+    """
     logger.log("NODE_ENTER", {"node": "clarify_agent"})
     
+    # KONDISI 1: User merespon klarifikasi tabel sebelumnya
     if state.get("clarification_response"):
-        # Process user response
         response = state["clarification_response"].strip()
         
         if response.isdigit():
@@ -484,73 +494,154 @@ def clarify_agent_node(state: AgentState) -> AgentState:
                 state["next_node"] = "planner"
                 return state
     
-    # Ask for clarification
+    # KONDISI 2: System butuh user memilih tabel (belum dijawab)
     if state.get("needs_clarification") and state.get("clarification_question"):
         state["final_answer"] = state["clarification_question"]
         state["next_node"] = "end"
+        
+    # KONDISI 3: General Question / Web Search
     else:
-        # General clarification
-        prompt = f"User query: {state['user_input']}. This is unclear. Ask for clarification in Bahasa Indonesia."
-        response = llm_client.call_user_llm(prompt)  # Ganti dari call_user_llm ke call_general_llm
+        # Jika masuk sini, artinya:
+        # a. Intent awal adalah 'clarify' (bukan SQL/Forecast)
+        # b. Metadata retriever tidak menemukan tabel (empty result)
+        
+        user_query = state['user_input']
+        logger.log("WEB_SEARCH_INIT", {"query": user_query})
+        
+        # 1. Cari Informasi di Web via Tavily
+        web_results = web_search_tool.search(user_query)
+        
+        # 2. Minta LLM menjawab berdasarkan hasil web
+        prompt = f"""
+        Anda adalah asisten AI yang membantu menjawab pertanyaan pengguna.
+        
+        PERTANYAAN PENGGUNA:
+        "{user_query}"
+        
+        HASIL PENCARIAN WEB (TAVILY):
+        {web_results}
+        
+        INSTRUKSI:
+        1. Jawab pertanyaan pengguna dalam Bahasa Indonesia yang baik dan benar.
+        2. Gunakan informasi dari hasil pencarian web di atas sebagai referensi utama.
+        3. Jika hasil pencarian web tidak relevan, gunakan pengetahuan umum Anda, namun beritahu pengguna bahwa data spesifik tidak ditemukan.
+        4. Jangan menyebutkan "berdasarkan hasil pencarian tavily", gunakan gaya bahasa natural seperti "Berdasarkan informasi terkini..."
+        
+        JAWABAN:
+        """
+        
+        response = llm_client.call_user_llm(prompt)
         
         if response["success"]:
             state["final_answer"] = response['content']
+            logger.log("WEB_SEARCH_SUCCESS", {"query": user_query})
         else:
-            state["error"] = "Failed to generate clarification"
+            state["error"] = "Gagal menghasilkan jawaban dari Web Search."
         
         state["next_node"] = "end"
     
     return state
 
 def response_formatter_node(state: AgentState) -> AgentState:
-    """Format final response untuk user"""
+    """Format final response untuk user dengan bantuan LLM"""
     logger.log("NODE_ENTER", {"node": "response_formatter"})
     
     try:
+        # --- KASUS 1: Hasil dari SQL Executor ---
         if state.get("execution_result"):
-            # Format SQL result
             result = state["execution_result"]
-            df = result["data"]
+            df = result.get("data")
             
-            if df.empty:
+            # Jika data kosong
+            if df is None or df.empty:
                 response = "✅ **HASIL QUERY**\n\n"
                 response += f"Tabel: {state.get('selected_table', 'Unknown')}\n"
-                response += "Query berhasil dieksekusi tetapi tidak ada data yang ditemukan."
-            else:
-                response = f"✅ **HASIL QUERY**\n\n"
-                response += f"Tabel: {state.get('selected_table', 'Unknown')}\n"
-                response += f"Jumlah baris: {len(df)}\n\n"
-                response += f"**Data (5 baris pertama):**\n"
-                response += df.head().to_string(index=False)
+                response += "Query berhasil dieksekusi tetapi tidak ada data yang ditemukan sesuai kriteria filter Anda."
                 
-                # Tambahkan query SQL jika ada
+                # Jika ada SQL, tampilkan untuk debug
                 if state.get("validated_sql"):
-                    response += f"\n\n**Query SQL:**\n```sql\n{state.get('validated_sql', 'N/A')}\n```"
-        
+                    response += f"\n\n**Query SQL:**\n```sql\n{state.get('validated_sql')}\n```"
+                
+                state["final_answer"] = response
+            
+            else:
+                # Jika ada data, minta LLM untuk menjelaskan
+                logger.log("FORMATTING_WITH_LLM", {"rows": len(df)})
+                
+                # Konversi data ke string CSV/Markdown untuk prompt
+                data_preview = df.head(10).to_markdown(index=False)
+                
+                user_query = state['user_input']
+                table_name = state.get('selected_table', 'Unknown')
+                
+                prompt = f"""
+                Anda adalah Data Analyst expert. Tugas Anda adalah menjelaskan data hasil query database kepada pengguna.
+                
+                PERTANYAAN PENGGUNA:
+                "{user_query}"
+                
+                SUMBER DATA (Tabel: {table_name}):
+                {data_preview}
+                
+                INSTRUKSI:
+                1. Jawab pertanyaan pengguna berdasarkan data di atas.
+                2. Berikan analisis singkat atau highlight (misal: tren, nilai tertinggi/terendah).
+                3. WAJIB: Sertakan ulang tabel data di atas dalam format Markdown agar pengguna bisa melihat detailnya.
+                4. Gunakan bahasa Indonesia yang profesional dan mudah dimengerti.
+                
+                JAWABAN:
+                """
+                
+                # Panggil LLM
+                response = llm_client.call_user_llm(prompt)
+                
+                if response["success"]:
+                    state["final_answer"] = response['content']
+                else:
+                    # Fallback jika LLM gagal format
+                    state["final_answer"] = f"Berikut data yang ditemukan:\n\n{data_preview}\n\n(Gagal membuat narasi penjelasan)"
+
+        # --- KASUS 2: Hasil dari Forecast Agent ---
         elif state.get("forecast_result"):
-            # Format forecast result
             forecast_data = state["forecast_result"]["forecast"]
             
-            response = f"📈 **HASIL FORECASTING**\n\n"
-            response += f"Tabel: {forecast_data['table_name']}\n"
-            response += f"Data points: {forecast_data['data_points']}\n"
-            response += f"Metode: {forecast_data['method']}\n\n"
-            response += f"**Prediksi {forecast_data['forecast_periods']} periode:**\n"
+            # Siapkan data prediksi untuk LLM
+            preds = forecast_data.get("predictions", [])
+            pred_text = "\n".join([f"- {p['period']}: {p['prediction']:.2f}" for p in preds])
             
-            for i, pred in enumerate(forecast_data["predictions"]):
-                response += f"{i+1}. {pred.get('period', f'Periode {i+1}')}: {pred.get('prediction', 0):.2f}\n"
+            prompt = f"""
+            Anda adalah Data Analyst. Jelaskan hasil prediksi forecasting berikut kepada pengguna.
             
-            # Tambahkan metadata jika ada
-            if forecast_data.get("metadata"):
-                meta = forecast_data["metadata"]
-                response += f"\n**Detail:**\n"
-                response += f"- Kolom tanggal: {meta.get('date_column', 'N/A')}\n"
-                response += f"- Kolom nilai: {meta.get('value_column', 'N/A')}\n"
-        
+            DATA FORECASTING (Metode: {forecast_data.get('method')}):
+            {pred_text}
+            
+            Info Tambahan:
+            - Tabel: {forecast_data.get('table_name')}
+            - Data points history: {forecast_data.get('data_points')}
+            
+            INSTRUKSI:
+            1. Jelaskan tren prediksi (naik/turun/stabil).
+            2. Sebutkan angka prediksi untuk periode terakhir.
+            3. Buatkan tabel markdown ringkas dari hasil prediksi tersebut.
+            """
+            
+            response = llm_client.call_user_llm(prompt)
+            if response["success"]:
+                state["final_answer"] = response['content']
+            else:
+                # Fallback manual formatting
+                resp_text = f"📈 **HASIL FORECASTING**\n\n"
+                resp_text += f"Metode: {forecast_data['method']}\n\n"
+                for p in preds:
+                    resp_text += f"- {p['period']}: {p['prediction']:.2f}\n"
+                state["final_answer"] = resp_text
+
+        # --- KASUS 3: Tidak ada hasil (Error atau Clarify) ---
         else:
-            response = "Tidak ada hasil yang dapat ditampilkan."
+            # Biasanya sudah dihandle di node lain, tapi buat jaga-jaga
+            if not state.get("final_answer"):
+                state["final_answer"] = "Maaf, tidak ada data yang dapat ditampilkan saat ini."
         
-        state["final_answer"] = response
         state["next_node"] = "end"
         
     except Exception as e:

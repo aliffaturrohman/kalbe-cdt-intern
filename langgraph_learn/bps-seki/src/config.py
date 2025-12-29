@@ -1,67 +1,83 @@
 # src/config.py
-"""Konfigurasi sistem"""
+"""Konfigurasi sistem menggunakan Azure OpenAI"""
 
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, Any
+from typing import Dict
+from dotenv import load_dotenv
+
+load_dotenv()
 
 @dataclass
 class Config:
-    """Konfigurasi utama sistem"""
-    
-    # Paths
+    # --- Root Path ---
     BASE_DIR: Path = Path.cwd()
-    METADATA_DIR: Path = BASE_DIR / "metadata"
-    DB_PATH: Path = BASE_DIR / "database.db"
-    LOG_DIR: Path = BASE_DIR / "logs"
     
-    # LLM Configuration
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    USER_MODEL: str = "qwen2.5:7b"
-    SQL_MODEL: str = "qwen2.5-coder:latest"
-    USER_TEMPERATURE: float = 0.1
-    SQL_TEMPERATURE: float = 0.0
+    # --- Azure OpenAI & Model ---
+    AZURE_OPENAI_ENDPOINT: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+    AZURE_OPENAI_API_KEY: str = os.getenv("AZURE_OPENAI_API_KEY", "")
+    USER_MODEL: str = os.getenv("AZURE_MODEL_DEPLOYMENT", "gpt-5-mini")
+    MODEL_VERSION: str = os.getenv("AZURE_MODEL_VERSION", "2024-02-15-preview")
     
-    # User Context (default)
-    USER_CONTEXT: Dict[str, str] = field(
-        default_factory=lambda: {
-            "leveldata": "2_KABUPATEN_JAWA_BARAT",
-            "region": "RM III JABAR"
-        }
-    )
+    # Casting ke tipe data yang benar agar aman saat dipanggil
+    MODEL_TEMPERATURE: float = float(os.getenv("MODEL_TEMPERATURE", "0.7"))
+    MODEL_MAX_TOKEN: int = int(os.getenv("MODEL_MAX_TOKEN", "512"))
     
-    # SQL Configuration
-    DEFAULT_LIMIT: int = 100
-    MAX_QUERY_LENGTH: int = 1000
+    # --- Web Search (Tavily) ---
+    TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
+    TAVILY_MAX_RESULTS: int = int(os.getenv("TAVILY_MAX_RESULTS", "3"))
     
-    # Forecasting Configuration
-    DEFAULT_FORECAST_PERIODS: int = 3
-    MIN_DATA_POINTS: int = 3
+    # --- Dynamic Paths ---
+    DB_NAME: str = os.getenv("DB_NAME", "database.db")
+    METADATA_FOLDER: str = os.getenv("METADATA_DIR_NAME", "metadata")
+    LOG_FOLDER: str = os.getenv("LOG_DIR_NAME", "logs")
+    DATA_FOLDER: str = os.getenv("DATA_DIR_NAME", "data")
     
-    # Security Configuration
-    ENABLE_SQL_VALIDATION: bool = True
-    ENABLE_REGION_FILTERING: bool = True
+    # --- Forecasting Config ---
+    MIN_DATA_POINTS: int = int(os.getenv("MIN_DATA_POINTS", "3"))
+    DEFAULT_FORECAST_PERIODS: int = int(os.getenv("DEFAULT_FORECAST_PERIODS", "3"))
+    DEFAULT_LIMIT: int = int(os.getenv("DEFAULT_LIMIT", "5"))
+
+    @property
+    def DB_PATH(self) -> Path:
+        return self.BASE_DIR / self.DB_NAME
+
+    @property
+    def LOG_DIR(self) -> Path:
+        return self.BASE_DIR / self.LOG_FOLDER
+
+    @property
+    def DATA_DIR(self) -> Path:
+        return self.BASE_DIR / self.DATA_FOLDER
+
+    @property
+    def METADATA_DIR(self) -> Path:
+        subfolder = os.getenv("ACTIVE_METADATA_SUBFOLDER", "")
+        return self.BASE_DIR / self.METADATA_FOLDER / subfolder
+
+    USER_CONTEXT: Dict[str, str] = field(default_factory=dict)
     
     @classmethod
     def from_env(cls):
-        """Load configuration from environment variables"""
         config = cls()
         
-        # Override with environment variables
-        if os.getenv("OLLAMA_BASE_URL"):
-            config.OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
-        if os.getenv("USER_MODEL"):
-            config.USER_MODEL = os.getenv("USER_MODEL")
-        if os.getenv("SQL_MODEL"):
-            config.SQL_MODEL = os.getenv("SQL_MODEL")
-        
-        # Create directories
-        config.METADATA_DIR.mkdir(exist_ok=True)
+        # Load User Context
+        config.USER_CONTEXT = {
+            "leveldata": os.getenv("LEVELDATA", "2_KABUPATEN_JAWA_BARAT"),
+            "region": os.getenv("REGION", "RM III JABAR")
+        }
+
+        # Auto-create directories jika belum ada
         config.LOG_DIR.mkdir(exist_ok=True)
+        config.METADATA_DIR.mkdir(parents=True, exist_ok=True)
         
         return config
 
-# Global configuration instance
+# Inisialisasi
 config = Config.from_env()
-USER_CONTEXT = config.USER_CONTEXT
+
+# Export untuk akses instan
+DB_PATH = config.DB_PATH
+METADATA_DIR = config.METADATA_DIR
+DATA_DIR = config.DATA_DIR

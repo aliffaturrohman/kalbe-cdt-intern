@@ -63,10 +63,11 @@ class SQLExecutor:
                     "execution_time": execution_time
                 }
                 
+                # --- LOGGING FULL CONTENT (Tanpa slicing) ---
                 logger.log("SQL_EXECUTION_SUCCESS", {
-                    "sql_preview": sql[:200],
+                    "sql_preview": sql,  # Menyimpan full SQL
                     "row_count": len(df),
-                    "columns": columns[:5] if columns else [],
+                    "columns": columns,  # Menyimpan full columns
                     "execution_time": execution_time
                 }, level="SUCCESS")
                 
@@ -81,7 +82,7 @@ class SQLExecutor:
             
             logger.log("SQL_EXECUTION_ERROR", {
                 "error": str(e),
-                "sql": sql[:200],
+                "sql": sql, # Menyimpan full SQL error
                 "execution_time": execution_time
             }, level="ERROR")
             
@@ -132,6 +133,8 @@ class SQLExecutor:
             cursor = conn.cursor()
             
             # Get column information
+            # Note: PRAGMA statements cannot use parameterized queries in standard way for table names,
+            # but in this controlled environment where table_name comes from metadata selection, it's acceptable.
             cursor.execute(f"PRAGMA table_info({table_name});")
             columns = cursor.fetchall()
             

@@ -10,3 +10,4 @@ numpy
 prophet
 python-dotenv
 requests
+streamlit

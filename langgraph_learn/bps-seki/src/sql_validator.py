@@ -45,6 +45,7 @@ class SQLValidator:
         
         # 2. Check forbidden keywords
         for keyword in cls.FORBIDDEN_KEYWORDS:
+            # Menggunakan regex word boundary agar keyword seperti 'update' tidak match 'last_updated'
             if re.search(rf'\b{keyword}\b', sql_lower):
                 return {
                     "is_valid": False,
@@ -69,7 +70,7 @@ class SQLValidator:
                 "suggested_fix": "Add FROM clause with table name"
             }
         
-        # 5. Parse SQL untuk validasi struktur
+        # 5. Parse SQL untuk validasi struktur multi-statement
         try:
             parsed = sqlparse.parse(sql)
             if len(parsed) > 1:
@@ -79,7 +80,7 @@ class SQLValidator:
                     "suggested_fix": "Use only one SELECT statement"
                 }
         except:
-            pass  # Jika parse gagal, tetap lanjut dengan warning
+            pass  # Jika parse gagal, tetap lanjut dengan warning/logging (fail open but safe by regex)
         
         return {
             "is_valid": True,
@@ -106,25 +107,28 @@ class SQLValidator:
             return sql
         
         # Inject WHERE clause
+        # Strategi: Jika ada WHERE, tambahkan AND. Jika tidak, cari tempat sebelum GROUP BY/ORDER BY/LIMIT.
         if "where" in sql_lower:
-            # Tambahkan AND clause
-            insert_pos = sql_lower.rfind("where") + 5
-            return sql[:insert_pos] + f" {access_column} LIKE '{region}%' AND" + sql[insert_pos:]
+            # Menggunakan regex case insensitive untuk mengganti 'where' dengan 'where <condition> AND'
+            # Kita ganti occurrence pertama 'where'
+            pattern = re.compile(r"where", re.IGNORECASE)
+            return pattern.sub(f"WHERE {access_column} LIKE '{region}%' AND", sql, count=1)
         else:
-            # Tambahkan WHERE clause baru
+            # Mencari posisi untuk menyisipkan WHERE
             for clause in ["group by", "order by", "limit"]:
-                if clause in sql_lower:
-                    pos = sql_lower.find(clause)
-                    return sql[:pos] + f" WHERE {access_column} LIKE '{region}%' " + sql[pos:]
+                idx = sql_lower.find(clause)
+                if idx != -1:
+                    return sql[:idx] + f" WHERE {access_column} LIKE '{region}%' " + sql[idx:]
             
-            # Tambahkan di akhir
+            # Jika tidak ada clause lain, tambahkan di akhir (sebelum semicolon)
             return sql.rstrip(";") + f" WHERE {access_column} LIKE '{region}%';"
     
     @classmethod
     def add_limit_if_missing(cls, sql: str, default_limit: int = None) -> str:
         """Tambahkan LIMIT jika tidak ada"""
         if default_limit is None:
-            default_limit = config.DEFAULT_LIMIT
+            # Safe config access
+            default_limit = getattr(config, 'DEFAULT_LIMIT', 10)
         
         sql_lower = sql.lower()
         
